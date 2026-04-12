@@ -46,7 +46,7 @@ App.tsx                          ← Root: switches between RecorderScreen and R
 │   └── useWhisper.ts            ← React hook: model download → load → record → transcribe
 ├── services/
 │   ├── ModelManager.ts          ← Downloads/caches Whisper .bin models from HuggingFace
-│   ├── WhisperService.ts        ← Wraps whisper.rn context: init, realtime transcription, file transcription
+│   ├── WhisperService.ts        ← Wraps whisper.rn context: init, realtime transcription (Arabic, VAD, word timestamps)
 │   ├── AudioRecorder.ts         ← Wraps AudioPcmStreamAdapter for raw 16-bit PCM at 16kHz mono
 │   ├── QuranDatabase.ts         ← Loads quran.json, provides lookup by surah/ayah/word
 │   ├── QuranSearch.ts           ← N-gram index (trigrams + pentagrams) for position detection
@@ -104,6 +104,19 @@ TranscriptionUpdate, TranscriptionSegment, WhisperServiceCallbacks
 ModelSize, ModelInfo, DownloadProgress, DownloadCallbacks
 ```
 
+### Service instantiation patterns
+
+| Module | Pattern | Usage |
+|---|---|---|
+| `QuranDatabase` | Exported **object** (singleton) | `QuranDatabase.getAyah(1, 1)` — no `new` |
+| `QuranSearch` | Exported **object** (singleton) | `QuranSearch.buildIndex()` — no `new` |
+| `RecitationTracker` | Exported **class** | `new RecitationTracker()` |
+| `WhisperService` | Exported **class** | `new WhisperService()` |
+| `ModelManager` | Exported **class** | `new ModelManager()` |
+| `AudioRecorder` | Exported **class** | `new AudioRecorder()` |
+
+Components have **no barrel export file** — import directly: `import { AyahDisplay } from '../components/AyahDisplay'`.
+
 ---
 
 ## App Flow
@@ -116,6 +129,32 @@ ModelSize, ModelInfo, DownloadProgress, DownloadCallbacks
    - `RecitationTracker` matches each 3-word window against current+next ayah scope
    - UI shows previous (dimmed), current (highlighted word-by-word), and next (dimmed) ayahs
    - On stop → shows `SessionSummary` with error report and per-error retry buttons
+
+### RecitationScreen state machine
+
+```
+idle ──[record]──► seeking ──[position found]──► tracking ──[stop]──► stopped
+  ▲                  │                              │                   │
+  └──────────────────┴──────────[stop]──────────────┘                   │
+  └─────────────────────────────[dismiss summary]───────────────────────┘
+```
+
+- **idle**: Waiting. User picks surah/ayah. Record button available.
+- **seeking**: Recording active. Accumulates words, feeds to `QuranSearch.findPosition()`. Minimum 3 words needed.
+- **tracking**: Position locked. Each Whisper update → `splitArabicWords()` → `normalizeArabic()` each → `tracker.processWords()`. UI updates via tracker callbacks.
+- **stopped**: Recording stopped. `SessionSummary` modal shown with errors and retry buttons.
+
+### Data pipeline (Whisper → Tracker)
+
+```
+Whisper onTranscription → transcription.text
+  → splitArabicWords(text)        // split by whitespace
+  → words.map(normalizeArabic)    // strip tashkeel + normalize
+  → [seeking]  QuranSearch.findPosition(words)
+  → [tracking] tracker.processWords(words)
+```
+
+`QuranSearch.buildIndex()` is called in a `useEffect` on RecitationScreen mount (runs once, cached in memory).
 
 ---
 
@@ -133,15 +172,25 @@ Whisper outputs Arabic **without tashkeel**. Quran text has full tashkeel.
 
 All comparison between Whisper output and Quran text **must** go through `normalizeArabic()`.
 
+### WhisperService configuration
+
+These are the key Whisper inference settings in `WhisperService.ts`:
+- **Language**: `'ar'` (Arabic)
+- **GPU**: enabled (`useGpu: true`, `useFlashAttn: true`)
+- **Audio slicing**: `audioSliceSec: 25`, `audioMinSec: 1`
+- **Word timestamps**: `tokenTimestamps: true`, `maxLen: 1` (one word per segment)
+- **Word confidence threshold**: `wordThold: 0.6`
+- **VAD**: `vadPreset: 'default'`, `autoSliceOnSpeechEnd: true`
+
 ---
 
 ## UI Design System
 
 - **Dark theme** throughout: background `#0d1117`, card surfaces `#141b22`
-- **Green accent**: `#5bd882` — active states, success, primary buttons
-- **Red accent**: `#f75555` — errors, recording indicator, skipped words
-- **Muted text**: `#667788` for secondary labels, `#8899AA` for upcoming words
-- **White text**: `#FFFFFF` for primary content
+- **Green accent**: `#5bd882` — correctly recited words, success, primary buttons
+- **Red accent**: `#f75555` — errors, recording indicator, skipped words (line-through)
+- **White text**: `#FFFFFF` — active/current word (with pulse animation + glow)
+- **Muted text**: `#667788` for secondary labels, `#8899AA` for upcoming words (opacity 0.6)
 - **Border lines**: `rgba(255,255,255,0.06)` hairline separators
 - **RTL layout**: `flexDirection: 'row-reverse'` for Arabic word containers
 - **Record button**: Circular, red fill, morphs to rounded square when recording
@@ -247,7 +296,7 @@ npm run lint
 - [ ] Build release AAB: `cd android && ./gradlew bundleRelease`
 - [ ] Set up Google Play Console: create app listing, content rating, data safety form
 - [ ] targetSdkVersion must meet Google Play's latest requirement (currently 36 — good)
-- [ ] Large app warning: quran.json is bundled (~3-4 MB). Consider if Play Store asset delivery is needed.
+- [ ] Large app warning: quran.json is bundled (~6.5 MB). Consider if Play Store asset delivery is needed.
 
 ### iOS (App Store)
 - [ ] Set `PRODUCT_BUNDLE_IDENTIFIER` in Xcode (e.g. `com.yourorg.quranreciter`)
@@ -280,10 +329,10 @@ Run with `npm test`. Uses Jest with `@react-native/jest-preset`.
 ## Known Constraints & Gotchas
 
 1. **Whisper requires real device**: Emulators don't have working microphones for real-time audio capture via `AudioPcmStreamAdapter`.
-2. **quran.json is large**: ~3-4 MB bundled JSON. Loaded synchronously via `import` at startup. If app launch is slow, consider lazy loading.
-3. **N-gram index build time**: `QuranSearch.buildIndex()` processes the entire Quran on first use. It runs once and is cached in memory.
+2. **quran.json is large**: ~6.5 MB bundled JSON. Loaded synchronously via `import` at startup. If app launch is slow, consider lazy loading.
+3. **N-gram index build time**: `QuranSearch.buildIndex()` is called in `useEffect` on RecitationScreen mount. It processes the entire Quran (~82K words) and is cached in module-level variables. Subsequent calls are effectively free.
 4. **No navigation library**: Screen switching is done via state in `App.tsx` (`'recorder' | 'recitation'`). If more screens are added, install `@react-navigation/native`.
 5. **useWhisper hook is shared**: Both RecorderScreen and RecitationScreen use `useWhisper()` independently. If both are mounted simultaneously, they'd create separate Whisper contexts. Current architecture avoids this by only rendering one at a time.
 6. **Release signing not configured**: Both Android and iOS use debug signing. Must be set up before store submission.
 7. **Hermes + New Architecture**: Both are enabled. All native modules must be compatible.
-8. **Model sizes**: Whisper models range from ~40MB (tiny) to ~1.5GB (large). User downloads on first use → stored via react-native-fs in the app's document directory.
+8. **Model sizes**: Whisper models: tiny (~75 MB), base (~142 MB), small (~466 MB, recommended), medium (~1530 MB). No "large" model is offered. User downloads on first use → stored via react-native-fs in the app's document directory.
