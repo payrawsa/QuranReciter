@@ -7,3 +7,10 @@ export { QuranDatabase } from './QuranDatabase';
 export type { AyahData, QuranWord, FlatWord } from './QuranDatabase';
 export { QuranSearch } from './QuranSearch';
 export type { WordPosition, SearchResult } from './QuranSearch';
+export { RecitationTracker } from './RecitationTracker';
+export type {
+  TrackingStatus,
+  PositionChangeEvent,
+  AyahCompleteEvent,
+  TrackerCallbacks,
+} from './RecitationTracker';
