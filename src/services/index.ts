@@ -5,3 +5,5 @@ export { ModelManager } from './ModelManager';
 export type { ModelSize, ModelInfo, DownloadProgress, DownloadCallbacks } from './ModelManager';
 export { QuranDatabase } from './QuranDatabase';
 export type { AyahData, QuranWord, FlatWord } from './QuranDatabase';
+export { QuranSearch } from './QuranSearch';
+export type { WordPosition, SearchResult } from './QuranSearch';
