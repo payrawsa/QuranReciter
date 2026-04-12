@@ -32,7 +32,11 @@ const STATUS_LABELS: Record<WhisperStatus, string> = {
   error: 'Error',
 };
 
-export default function RecorderScreen() {
+export default function RecorderScreen({
+  onNavigate,
+}: {
+  onNavigate?: () => void;
+}) {
   const {
     status,
     error,
@@ -146,8 +150,13 @@ export default function RecorderScreen() {
         ))}
       </View>
 
-      {/* Record Button */}
+      {/* Navigate to Recitation + Record */}
       <View style={styles.recordSection}>
+        {onNavigate && status === 'ready' && (
+          <TouchableOpacity style={styles.reciteBtn} onPress={onNavigate}>
+            <Text style={styles.reciteBtnText}>Start Recitation ›</Text>
+          </TouchableOpacity>
+        )}
         <TouchableOpacity
           style={[
             styles.recordBtn,
@@ -197,7 +206,7 @@ export default function RecorderScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#0a0a0a',
+    backgroundColor: '#0d1117',
     paddingTop: 60,
   },
   header: {
@@ -306,6 +315,18 @@ const styles = StyleSheet.create({
   deleteBtnText: {
     color: '#ff4444',
     fontSize: 16,
+  },
+  reciteBtn: {
+    backgroundColor: '#5bd882',
+    paddingHorizontal: 28,
+    paddingVertical: 14,
+    borderRadius: 14,
+    marginBottom: 16,
+  },
+  reciteBtnText: {
+    color: '#0d1117',
+    fontSize: 17,
+    fontWeight: '700',
   },
   recordSection: {
     alignItems: 'center',
