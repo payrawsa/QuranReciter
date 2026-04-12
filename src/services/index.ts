@@ -13,4 +13,7 @@ export type {
   PositionChangeEvent,
   AyahCompleteEvent,
   TrackerCallbacks,
+  RecitationError,
+  RecitationErrorType,
+  WordStatus,
 } from './RecitationTracker';
