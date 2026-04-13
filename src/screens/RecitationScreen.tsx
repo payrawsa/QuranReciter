@@ -18,7 +18,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { AyahDisplay } from '../components/AyahDisplay';
 import { SurahSelector } from '../components/SurahSelector';
 import { SessionSummary } from '../components/SessionSummary';
-import { useWhisper } from '../hooks/useWhisper';
+import type { WhisperState } from '../hooks/useWhisper';
 import {
   QuranDatabase,
   QuranSearch,
@@ -27,7 +27,7 @@ import {
   type RecitationError,
   type WordStatus,
 } from '../services';
-import { splitArabicWords } from '../utils/arabic';
+import { splitArabicWords, normalizeArabic } from '../utils/arabic';
 
 I18nManager.allowRTL(true);
 
@@ -38,19 +38,21 @@ type RecitationPhase =
   | 'stopped';   // Session ended, showing summary
 
 export default function RecitationScreen({
+  whisper,
   onBack,
 }: {
+  whisper: WhisperState;
   onBack: () => void;
 }) {
   const insets = useSafeAreaInsets();
 
-  // ── Whisper ──
+  // ── Whisper (shared from App.tsx) ──
   const {
     status: whisperStatus,
     transcription,
     startRecording,
     stopRecording,
-  } = useWhisper();
+  } = whisper;
 
   // ── Recitation state ──
   const [phase, setPhase] = useState<RecitationPhase>('idle');
@@ -87,7 +89,7 @@ export default function RecitationScreen({
   // ── Pulse animation for recording indicator ──
   useEffect(() => {
     if (phase === 'seeking' || phase === 'tracking') {
-      Animated.loop(
+      const loop = Animated.loop(
         Animated.sequence([
           Animated.timing(pulseAnim, {
             toValue: 0.3,
@@ -100,10 +102,18 @@ export default function RecitationScreen({
             useNativeDriver: true,
           }),
         ]),
-      ).start();
-    } else {
-      pulseAnim.stopAnimation();
-      pulseAnim.setValue(1);
+      );
+      loop.start();
+
+      return () => {
+        loop.stop();
+        // Reset via native driver to avoid JS/native conflict
+        Animated.timing(pulseAnim, {
+          toValue: 1,
+          duration: 0,
+          useNativeDriver: true,
+        }).start();
+      };
     }
   }, [phase, pulseAnim]);
 
@@ -115,12 +125,31 @@ export default function RecitationScreen({
     if (words.length === 0) return;
 
     if (phase === 'seeking') {
-      seekingWordsRef.current = words;
+      // Accumulate words across slices (each slice is independent)
+      const prevWords = seekingWordsRef.current;
+      const newWords = [...prevWords, ...words];
+      seekingWordsRef.current = newWords;
+
+      // Use a sliding window of recent words to prevent confidence
+      // dilution as more words accumulate across multiple ayahs.
+      const MAX_SEEK_WINDOW = 10;
+      const recentWords = newWords.length > MAX_SEEK_WINDOW
+        ? newWords.slice(-MAX_SEEK_WINDOW)
+        : newWords;
+
+      // Normalize for search
+      const normalized = recentWords.map(w => normalizeArabic(w));
+
+      console.log(`[Recitation] Seeking: ${newWords.length} words accumulated (using last ${normalized.length}), latest slice: "${words.join(' ')}"`);
+
       // Try to find position once we have enough words
-      if (words.length >= 3) {
-        const result = QuranSearch.findPosition(words);
-        if (result && result.confidence >= 0.3) {
+      if (normalized.length >= 3) {
+        const result = QuranSearch.findPosition(normalized);
+        console.log(`[Recitation] Search result:`, result ? `surah=${result.position.surah} ayah=${result.position.ayah} word=${result.position.wordIndex} confidence=${result.confidence.toFixed(3)} matchCount=${result.matchCount}` : 'null');
+
+        if (result && result.confidence >= 0.15) {
           // Found position — start tracking
+          console.log(`[Recitation] Position locked! Moving to tracking phase.`);
           setSurah(result.position.surah);
           setAyah(result.position.ayah);
           setCurrentWordIndex(result.position.wordIndex);
@@ -133,6 +162,7 @@ export default function RecitationScreen({
         }
       }
     } else if (phase === 'tracking') {
+      console.log(`[Recitation] Tracking: processing ${words.length} words: "${words.join(' ')}"`);
       transcriptWordsRef.current = words;
       trackerRef.current.processWords(words);
 
@@ -211,10 +241,15 @@ export default function RecitationScreen({
       await startRecording();
       setPhase('seeking');
     } else {
-      // Stop recording
-      await stopRecording();
+      // Stop recording — get errors before stopping tracker
+      const finalErrors = trackerRef.current.getErrors();
       trackerRef.current.stop();
-      setErrors(trackerRef.current.getErrors());
+      try {
+        await stopRecording();
+      } catch (e) {
+        console.warn('[Recitation] Error stopping recording:', e);
+      }
+      setErrors(finalErrors);
       setPhase('stopped');
       setShowSummary(true);
     }

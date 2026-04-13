@@ -4,6 +4,7 @@
  * Models are downloaded from Hugging Face (ggerganov/whisper.cpp)
  * and stored in the app's document directory.
  */
+import { Platform } from 'react-native';
 import RNFS from 'react-native-fs';
 
 export type ModelSize = 'tiny' | 'base' | 'small' | 'medium';
@@ -116,7 +117,41 @@ export class ModelManager {
   }
 
   /**
+   * In dev mode, try to copy a pre-downloaded model from the app's
+   * main bundle (models/ directory added via Xcode or the download script).
+   * Returns the destination path if found, null otherwise.
+   */
+  private async copyLocalModelIfAvailable(size: ModelSize): Promise<string | null> {
+    if (!__DEV__) return null;
+
+    const fileName = MODELS[size].fileName;
+    const destPath = this.getModelPath(size);
+
+    // On iOS, check the main bundle for models/ folder
+    if (Platform.OS === 'ios' && RNFS.MainBundlePath) {
+      const bundlePath = `${RNFS.MainBundlePath}/models/${fileName}`;
+      if (await RNFS.exists(bundlePath)) {
+        await RNFS.copyFile(bundlePath, destPath);
+        return destPath;
+      }
+    }
+
+    // Check the app's document directory for manually placed models
+    const manualPath = `${RNFS.DocumentDirectoryPath}/models/${fileName}`;
+    if (await RNFS.exists(manualPath)) {
+      await RNFS.copyFile(manualPath, destPath);
+      return destPath;
+    }
+
+    return null;
+  }
+
+  /**
    * Download a Whisper model. Returns the local file path on success.
+   *
+   * In dev mode, this first checks for locally available model files
+   * (placed by scripts/download-models.sh) before attempting a network
+   * download. This avoids TLS issues on the iOS simulator.
    */
   async downloadModel(
     size: ModelSize,
@@ -132,6 +167,13 @@ export class ModelManager {
     if (exists) {
       callbacks?.onComplete?.(destPath);
       return destPath;
+    }
+
+    // In dev mode, try to use a locally available model first
+    const localPath = await this.copyLocalModelIfAvailable(size);
+    if (localPath) {
+      callbacks?.onComplete?.(localPath);
+      return localPath;
     }
 
     // Download with progress tracking

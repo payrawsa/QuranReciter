@@ -1,17 +1,18 @@
 /**
  * RecitationTracker — tracks the user's position during Quran recitation.
  *
- * After Phase 2 (QuranSearch) locks the starting position, the tracker
- * narrows scope to *current ayah + next ayah* only. It uses a 3-word
- * sliding window from the transcript to find the user's position within
- * that scope, always picking the nearest forward match from the cursor.
+ * After QuranSearch locks the starting position, the tracker narrows scope
+ * to *current ayah + next ayah* only. It uses character-level fuzzy matching
+ * (longest common substring) against the scope text to find the user's
+ * position, tolerating Whisper transcription errors like extra/missing
+ * letters and word boundary differences.
  *
  * As the user completes an ayah the window shifts forward automatically.
  * Skipped words (and skipped ayahs) are detected and recorded as errors.
  */
 
 import { QuranDatabase, type AyahData, type QuranWord } from './QuranDatabase';
-import { normalizeArabic } from '../utils/arabic';
+import { normalizeArabic, arabicLettersOnly } from '../utils/arabic';
 
 // ── Public types ──────────────────────────────────────────────────────
 
@@ -55,7 +56,11 @@ export type TrackerCallbacks = {
 
 // ── Constants ─────────────────────────────────────────────────────────
 
-const WINDOW_SIZE = 3; // 3-word sliding window
+/** Minimum characters from Whisper to attempt matching. */
+const MIN_CHARS = 5;
+
+/** Minimum ratio of matched chars to transcript chars to accept a match. */
+const MIN_MATCH_RATIO = 0.4;
 
 // ── Internal: flattened word list for the search scope ─────────────
 
@@ -66,6 +71,10 @@ type ScopeWord = {
   wordIndex: number;
   /** Linear offset within the scope (0-based) */
   offset: number;
+  /** Character start index in the scope's concatenated char string */
+  charStart: number;
+  /** Character end index (exclusive) in the scope's concatenated char string */
+  charEnd: number;
 };
 
 // ── Tracker ───────────────────────────────────────────────────────────
@@ -78,8 +87,12 @@ export class RecitationTracker {
 
   // The flattened word list covering current + next ayah
   private scope: ScopeWord[] = [];
+  // Concatenated normalized characters of all words in scope (no spaces)
+  private scopeChars = '';
   // The offset within `scope` that corresponds to the cursor
   private cursorOffset = 0;
+  // Character position of cursor in scopeChars
+  private cursorCharPos = 0;
   // The ayah numbers currently in scope
   private currentAyah: AyahData | null = null;
   private nextAyah: AyahData | null = null;
@@ -113,7 +126,9 @@ export class RecitationTracker {
   stop(): void {
     this.status = 'idle';
     this.scope = [];
+    this.scopeChars = '';
     this.cursorOffset = 0;
+    this.cursorCharPos = 0;
     this.currentAyah = null;
     this.nextAyah = null;
   }
@@ -158,62 +173,69 @@ export class RecitationTracker {
   // ── Core: process new transcription ────────────────────────────────
 
   /**
-   * Feed new transcript words from Whisper.  The tracker extracts the
-   * last 3 words, searches within the current+next ayah scope,
-   * and advances the cursor to the nearest forward match.
+   * Feed new transcript words from Whisper. Converts to characters,
+   * finds the best fuzzy match in the scope from cursorCharPos onward,
+   * and advances the cursor to the matched word.
    *
    * @param words — array of raw transcript words (will be normalized)
    */
   processWords(words: string[]): void {
-    if (this.status !== 'tracking' || words.length < WINDOW_SIZE) {
+    if (this.status !== 'tracking' || words.length === 0) {
       return;
     }
 
-    const normalized = words.map(w => normalizeArabic(w));
-
-    // Extract the last 3-word window from the transcript
-    const window = normalized.slice(-WINDOW_SIZE);
-    const windowKey = window.join(' ');
-
-    // Find all matching positions in scope from cursor onward
-    const matches = this.findWindowMatches(windowKey);
-
-    if (matches.length === 0) {
-      return; // no match — cursor stays
-    }
-
-    // Pick the nearest forward match (smallest offset ≥ cursorOffset)
-    const best = matches[0]; // already sorted nearest-first by findWindowMatches
-
-    // Advance cursor to the END of the matched window (last word of trigram)
-    const newOffset = best.offset + WINDOW_SIZE - 1;
-    const newWord = this.scope[newOffset];
-    if (!newWord) return;
-
-    // ── Detect skipped words between old cursor and the match start ──
-    const skippedWords = this.detectSkippedWords(
-      this.cursorOffset,
-      best.offset,
+    // Normalize and extract Arabic-only characters from transcript
+    const transcriptChars = arabicLettersOnly(
+      words.map(w => normalizeArabic(w)).join(''),
     );
 
-    // Mark the matched words as correct
-    for (let i = best.offset; i <= newOffset; i++) {
+    if (transcriptChars.length < MIN_CHARS) {
+      return;
+    }
+
+    // Find best match position in scope characters from cursor onward
+    const searchFrom = this.cursorCharPos;
+    const matchResult = this.findBestCharMatch(transcriptChars, searchFrom);
+
+    if (!matchResult) {
+      return; // no sufficient match — cursor stays
+    }
+
+    // Map the matched character end position back to a word
+    const matchedWord = this.charPosToWord(matchResult.endCharPos);
+    if (!matchedWord) return;
+
+    const newOffset = matchedWord.offset;
+    if (newOffset <= this.cursorOffset) return; // no forward progress
+
+    // ── Detect skipped words between old cursor and the new position ──
+    // Find the word at the match start
+    const startWord = this.charPosToWord(matchResult.startCharPos);
+    const skipUpTo = startWord ? startWord.offset : newOffset;
+    const skippedWords = this.detectSkippedWords(this.cursorOffset, skipUpTo);
+
+    // Mark words covered by the match as correct
+    const startOffset = startWord ? startWord.offset : newOffset;
+    for (let i = startOffset; i <= newOffset; i++) {
       const sw = this.scope[i];
-      this.wordStatuses.set(
-        `${sw.surah}:${sw.ayah}:${sw.wordIndex}`,
-        'correct',
-      );
+      if (sw) {
+        this.wordStatuses.set(
+          `${sw.surah}:${sw.ayah}:${sw.wordIndex}`,
+          'correct',
+        );
+      }
     }
 
     const prevPos = { ...this.cursor };
     this.cursor = {
-      surah: newWord.surah,
-      ayah: newWord.ayah,
-      wordIndex: newWord.wordIndex,
+      surah: matchedWord.surah,
+      ayah: matchedWord.ayah,
+      wordIndex: matchedWord.wordIndex,
     };
     this.cursorOffset = newOffset;
+    this.cursorCharPos = matchedWord.charEnd;
 
-    // Emit position change (includes skipped words info)
+    // Emit position change
     if (
       prevPos.surah !== this.cursor.surah ||
       prevPos.ayah !== this.cursor.ayah ||
@@ -316,11 +338,12 @@ export class RecitationTracker {
   }
 
   /**
-   * Rebuild the flattened scope from the current ayah + next ayah
-   * and set cursorOffset to match the cursor position.
+   * Rebuild the flattened scope from the current ayah + next ayah,
+   * compute character positions, and set cursorOffset/cursorCharPos.
    */
   private rebuildScope(): void {
     this.scope = [];
+    this.scopeChars = '';
 
     this.currentAyah =
       QuranDatabase.getAyah(this.cursor.surah, this.cursor.ayah) ?? null;
@@ -338,34 +361,48 @@ export class RecitationTracker {
       ? QuranDatabase.getAyah(nextPos.surah, nextPos.ayah) ?? null
       : null;
 
-    // Flatten current ayah words
+    // Flatten current ayah words with character positions
     let offset = 0;
+    let charPos = 0;
     for (const w of this.currentAyah.words) {
+      const charStart = charPos;
+      const charEnd = charStart + w.textClean.length;
       this.scope.push({
         text: w.textClean,
         surah: this.currentAyah.surah,
         ayah: this.currentAyah.ayah,
         wordIndex: w.index,
         offset,
+        charStart,
+        charEnd,
       });
+      charPos = charEnd;
       offset++;
     }
 
     // Flatten next ayah words
     if (this.nextAyah) {
       for (const w of this.nextAyah.words) {
+        const charStart = charPos;
+        const charEnd = charStart + w.textClean.length;
         this.scope.push({
           text: w.textClean,
           surah: this.nextAyah.surah,
           ayah: this.nextAyah.ayah,
           wordIndex: w.index,
           offset,
+          charStart,
+          charEnd,
         });
+        charPos = charEnd;
         offset++;
       }
     }
 
-    // Set cursor offset
+    // Build concatenated character string
+    this.scopeChars = this.scope.map(sw => sw.text).join('');
+
+    // Set cursor offset and char position
     this.cursorOffset = this.scope.findIndex(
       sw =>
         sw.surah === this.cursor.surah &&
@@ -373,29 +410,86 @@ export class RecitationTracker {
         sw.wordIndex === this.cursor.wordIndex,
     );
     if (this.cursorOffset < 0) this.cursorOffset = 0;
+    this.cursorCharPos = this.scope[this.cursorOffset]?.charStart ?? 0;
   }
 
   /**
-   * Search the scope for all positions where `windowKey` matches,
-   * only at offsets ≥ cursorOffset, sorted nearest-first.
+   * Find the best character-level match of `transcript` in scopeChars
+   * starting from `fromCharPos`. Uses longest common substring to find
+   * the densest overlap, tolerating insertions/deletions from Whisper.
+   *
+   * Returns the start and end character positions in scopeChars, or null.
    */
-  private findWindowMatches(windowKey: string): ScopeWord[] {
-    const results: ScopeWord[] = [];
+  private findBestCharMatch(
+    transcript: string,
+    fromCharPos: number,
+  ): { startCharPos: number; endCharPos: number } | null {
+    const scope = this.scopeChars;
+    if (scope.length === 0 || transcript.length === 0) return null;
 
-    // Only search from cursor offset onward (forward matches)
-    const maxStart = this.scope.length - WINDOW_SIZE;
-    for (let i = this.cursorOffset; i <= maxStart; i++) {
-      const candidate = this.scope
-        .slice(i, i + WINDOW_SIZE)
-        .map(sw => sw.text)
-        .join(' ');
+    // Search only from cursor position onward
+    const searchScope = scope.slice(fromCharPos);
+    if (searchScope.length === 0) return null;
 
-      if (candidate === windowKey) {
-        results.push(this.scope[i]);
+    // Find the longest common substring between transcript and searchScope
+    const tLen = transcript.length;
+    const sLen = searchScope.length;
+
+    // DP for longest common substring
+    let bestLen = 0;
+    let bestEndT = 0; // end index in transcript (1-based)
+    let bestEndS = 0; // end index in searchScope (1-based)
+
+    // Use a single row DP to save memory
+    let prev = new Array(sLen + 1).fill(0);
+    let curr = new Array(sLen + 1).fill(0);
+
+    for (let i = 1; i <= tLen; i++) {
+      for (let j = 1; j <= sLen; j++) {
+        if (transcript[i - 1] === searchScope[j - 1]) {
+          curr[j] = prev[j - 1] + 1;
+          if (curr[j] > bestLen) {
+            bestLen = curr[j];
+            bestEndT = i;
+            bestEndS = j;
+          }
+        } else {
+          curr[j] = 0;
+        }
       }
+      [prev, curr] = [curr, prev];
+      curr.fill(0);
     }
 
-    return results; // already in offset order (nearest first)
+    // Check if the match is good enough
+    if (bestLen < MIN_CHARS || bestLen / tLen < MIN_MATCH_RATIO) {
+      return null;
+    }
+
+    // Map back to absolute scopeChars positions
+    const matchStartInScope = fromCharPos + (bestEndS - bestLen);
+    const matchEndInScope = fromCharPos + bestEndS - 1;
+
+    return {
+      startCharPos: matchStartInScope,
+      endCharPos: matchEndInScope,
+    };
+  }
+
+  /**
+   * Map a character position in scopeChars back to the ScopeWord it belongs to.
+   */
+  private charPosToWord(charPos: number): ScopeWord | null {
+    for (const sw of this.scope) {
+      if (charPos >= sw.charStart && charPos < sw.charEnd) {
+        return sw;
+      }
+    }
+    // If charPos is at the very end, return last word
+    if (this.scope.length > 0 && charPos >= this.scope[this.scope.length - 1].charStart) {
+      return this.scope[this.scope.length - 1];
+    }
+    return null;
   }
 
   /**

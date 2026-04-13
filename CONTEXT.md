@@ -125,8 +125,8 @@ Components have **no barrel export file** — import directly: `import { AyahDis
 2. **RecitationScreen** (navigated via "Start Recitation ›" button when model is ready):
    - User selects surah/ayah via `SurahSelector`
    - Taps record → enters **seeking** phase (accumulates transcript words, runs `QuranSearch.findPosition()`)
-   - When position found with confidence ≥ 0.3 → enters **tracking** phase
-   - `RecitationTracker` matches each 3-word window against current+next ayah scope
+   - When position found with confidence ≥ 0.15 → enters **tracking** phase
+   - `RecitationTracker` uses character-level fuzzy matching (longest common substring) against current+next ayah scope
    - UI shows previous (dimmed), current (highlighted word-by-word), and next (dimmed) ayahs
    - On stop → shows `SessionSummary` with error report and per-error retry buttons
 
@@ -140,8 +140,8 @@ idle ──[record]──► seeking ──[position found]──► tracking �
 ```
 
 - **idle**: Waiting. User picks surah/ayah. Record button available.
-- **seeking**: Recording active. Accumulates words, feeds to `QuranSearch.findPosition()`. Minimum 3 words needed.
-- **tracking**: Position locked. Each Whisper update → `splitArabicWords()` → `normalizeArabic()` each → `tracker.processWords()`. UI updates via tracker callbacks.
+- **seeking**: Recording active. Accumulates words (uses last 10 as sliding window), feeds to `QuranSearch.findPosition()`. Minimum 3 words needed. Confidence threshold: 0.15.
+- **tracking**: Position locked. Each Whisper update → `splitArabicWords()` → `tracker.processWords(words)`. Tracker normalizes internally and uses character-level matching. UI updates via tracker callbacks.
 - **stopped**: Recording stopped. `SessionSummary` modal shown with errors and retry buttons.
 
 ### Data pipeline (Whisper → Tracker)
@@ -149,12 +149,26 @@ idle ──[record]──► seeking ──[position found]──► tracking �
 ```
 Whisper onTranscription → transcription.text
   → splitArabicWords(text)        // split by whitespace
-  → words.map(normalizeArabic)    // strip tashkeel + normalize
-  → [seeking]  QuranSearch.findPosition(words)
+
+  → [seeking]  words.map(normalizeArabic) → QuranSearch.findPosition(words)
+               Uses fuzzy word-level matching (edit distance on trigrams)
+
   → [tracking] tracker.processWords(words)
+               Internally: normalizeArabic + arabicLettersOnly → character-level
+               longest common substring against scope text
 ```
 
 `QuranSearch.buildIndex()` is called in a `useEffect` on RecitationScreen mount (runs once, cached in memory).
+
+### Matching strategy: hybrid word + character approach
+
+**Why two approaches?** Whisper's Arabic transcription introduces two kinds of errors that need different solutions:
+
+1. **Word-level errors** (seeking phase): Whisper may transcribe "الإبلي" instead of "الابل" (extra letter), or "كيف؟" instead of "كيف" (punctuation). These are small per-word deviations. The **QuranSearch** module handles this with **fuzzy word matching** — it builds a trigram (3-word window) index over the entire Quran, then matches transcript trigrams using edit distance (≤2 edits per word). This is efficient for position detection across ~82K words because the n-gram index narrows candidates quickly.
+
+2. **Word boundary errors** (tracking phase): Whisper may split or merge words differently than the Quran text. For example, "و الى" vs "والي", or "الإبلي كيف" where the "ي" bleeds across the word boundary. Exact word-window matching breaks entirely here. The **RecitationTracker** handles this with **character-level matching** — it concatenates all scope words (current + next ayah) into a single character string, strips everything to Arabic letters only, and finds the longest common substring between the Whisper output and the scope. This is completely insensitive to word boundaries.
+
+**Seeking** uses a sliding window of the last 10 accumulated words (not all words) to prevent confidence dilution as more ayahs are recited before a lock.
 
 ---
 
@@ -170,17 +184,22 @@ Whisper outputs Arabic **without tashkeel**. Quran text has full tashkeel.
 - Remove tatweel/kashida (ـ)
 - Collapse whitespace
 
-All comparison between Whisper output and Quran text **must** go through `normalizeArabic()`.
+Additional utilities in `arabic.ts`:
+- `arabicLettersOnly(text)` — strips everything except Arabic letters (U+0621–U+064A). Used by RecitationTracker for character-level matching.
+- `editDistance(a, b)` — Levenshtein distance between two strings. Used by QuranSearch for fuzzy word matching.
+
+All comparison between Whisper output and Quran text **must** go through `normalizeArabic()`. For character-level matching, additionally apply `arabicLettersOnly()` to remove punctuation, digits, and non-Arabic characters that Whisper may insert.
 
 ### WhisperService configuration
 
 These are the key Whisper inference settings in `WhisperService.ts`:
 - **Language**: `'ar'` (Arabic)
 - **GPU**: enabled (`useGpu: true`, `useFlashAttn: true`)
-- **Audio slicing**: `audioSliceSec: 25`, `audioMinSec: 1`
+- **Audio slicing**: `audioSliceSec: 5`, `audioMinSec: 3`
 - **Word timestamps**: `tokenTimestamps: true`, `maxLen: 1` (one word per segment)
 - **Word confidence threshold**: `wordThold: 0.6`
-- **VAD**: `vadPreset: 'default'`, `autoSliceOnSpeechEnd: true`
+- **VAD**: disabled (`autoSliceOnSpeechEnd: false`) — slices fire on duration alone
+- **Previous slice prompting**: disabled (`promptPreviousSlices: false`) — prevents hallucination feedback loops
 
 ---
 
@@ -209,9 +228,17 @@ These are the key Whisper inference settings in `WhisperService.ts`:
 ### Install dependencies
 ```bash
 npm install
-# or
-yarn install
 ```
+
+### Download Whisper models
+Models are not checked into the repo. Run the download script before your first build:
+```bash
+./scripts/download-models.sh tiny      # ~75 MB, fastest
+./scripts/download-models.sh small     # ~466 MB, recommended for Arabic
+./scripts/download-models.sh all       # downloads all sizes
+```
+
+Models are saved to `models/` (git-ignored). The Xcode build phase "Copy Whisper Models" automatically bundles them into the app. In dev mode, the app loads models from the bundle instead of downloading from HuggingFace (avoids simulator TLS issues).
 
 ### Generate Quran data (only if quran.json is missing)
 ```bash
@@ -332,7 +359,7 @@ Run with `npm test`. Uses Jest with `@react-native/jest-preset`.
 2. **quran.json is large**: ~6.5 MB bundled JSON. Loaded synchronously via `import` at startup. If app launch is slow, consider lazy loading.
 3. **N-gram index build time**: `QuranSearch.buildIndex()` is called in `useEffect` on RecitationScreen mount. It processes the entire Quran (~82K words) and is cached in module-level variables. Subsequent calls are effectively free.
 4. **No navigation library**: Screen switching is done via state in `App.tsx` (`'recorder' | 'recitation'`). If more screens are added, install `@react-navigation/native`.
-5. **useWhisper hook is shared**: Both RecorderScreen and RecitationScreen use `useWhisper()` independently. If both are mounted simultaneously, they'd create separate Whisper contexts. Current architecture avoids this by only rendering one at a time.
+5. **useWhisper hook is shared**: `useWhisper()` is called once in `App.tsx` and passed as a `whisper` prop to both screens. This ensures the loaded model, status, and transcription state persist across screen navigation.
 6. **Release signing not configured**: Both Android and iOS use debug signing. Must be set up before store submission.
 7. **Hermes + New Architecture**: Both are enabled. All native modules must be compatible.
 8. **Model sizes**: Whisper models: tiny (~75 MB), base (~142 MB), small (~466 MB, recommended), medium (~1530 MB). No "large" model is offered. User downloads on first use → stored via react-native-fs in the app's document directory.

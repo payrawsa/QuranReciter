@@ -63,3 +63,37 @@ export function splitArabicWords(text: string): string[] {
     .split(/\s+/)
     .filter(w => w.length > 0);
 }
+
+/**
+ * Strip everything except Arabic letters (U+0621–U+064A).
+ * Removes spaces, punctuation, digits, Latin chars, question marks, etc.
+ * Used for character-level fuzzy matching where word boundaries don't matter.
+ */
+export function arabicLettersOnly(text: string): string {
+  return text.replace(/[^\u0621-\u064A]/g, '');
+}
+
+/**
+ * Compute edit distance between two short strings (Levenshtein).
+ * Used for fuzzy word matching in QuranSearch.
+ */
+export function editDistance(a: string, b: string): number {
+  const m = a.length;
+  const n = b.length;
+  // Use single-row DP for space efficiency
+  let prev = new Array(n + 1);
+  let curr = new Array(n + 1);
+  for (let j = 0; j <= n; j++) prev[j] = j;
+  for (let i = 1; i <= m; i++) {
+    curr[0] = i;
+    for (let j = 1; j <= n; j++) {
+      if (a[i - 1] === b[j - 1]) {
+        curr[j] = prev[j - 1];
+      } else {
+        curr[j] = 1 + Math.min(prev[j - 1], prev[j], curr[j - 1]);
+      }
+    }
+    [prev, curr] = [curr, prev];
+  }
+  return prev[n];
+}

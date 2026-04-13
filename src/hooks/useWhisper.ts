@@ -150,3 +150,6 @@ export function useWhisper() {
     cancelDownload,
   };
 }
+
+/** Return type of useWhisper, for passing as props between screens. */
+export type WhisperState = ReturnType<typeof useWhisper>;

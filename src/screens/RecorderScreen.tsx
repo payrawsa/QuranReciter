@@ -17,7 +17,7 @@ import {
   Alert,
   I18nManager,
 } from 'react-native';
-import { useWhisper, type WhisperStatus } from '../hooks/useWhisper';
+import type { WhisperStatus, WhisperState } from '../hooks/useWhisper';
 import type { ModelSize } from '../services/ModelManager';
 
 // Force RTL for Arabic text display
@@ -33,8 +33,10 @@ const STATUS_LABELS: Record<WhisperStatus, string> = {
 };
 
 export default function RecorderScreen({
+  whisper,
   onNavigate,
 }: {
+  whisper: WhisperState;
   onNavigate?: () => void;
 }) {
   const {
@@ -49,7 +51,7 @@ export default function RecorderScreen({
     stopRecording,
     deleteModel,
     cancelDownload,
-  } = useWhisper();
+  } = whisper;
 
   const isLoading = status === 'downloading' || status === 'loading';
 

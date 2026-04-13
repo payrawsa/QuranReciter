@@ -53,6 +53,9 @@ yarn-error.log
 **/fastlane/screenshots
 **/fastlane/test_output
 
+# Whisper model binaries (downloaded via scripts/download-models.sh)
+models/
+
 # Bundle artifact
 *.jsbundle
 

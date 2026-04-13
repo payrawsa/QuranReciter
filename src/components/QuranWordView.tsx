@@ -26,12 +26,11 @@ export const QuranWordView: React.FC<Props> = ({
   onPress,
 }) => {
   const scale = useRef(new Animated.Value(1)).current;
-  const glow = useRef(new Animated.Value(0)).current;
+  const loopRef = useRef<Animated.CompositeAnimation | null>(null);
 
   useEffect(() => {
     if (status === 'active') {
-      // Gentle pulse for the active word
-      Animated.loop(
+      const loop = Animated.loop(
         Animated.sequence([
           Animated.timing(scale, {
             toValue: 1.08,
@@ -44,39 +43,32 @@ export const QuranWordView: React.FC<Props> = ({
             useNativeDriver: true,
           }),
         ]),
-      ).start();
-      Animated.timing(glow, {
-        toValue: 1,
-        duration: 300,
-        useNativeDriver: false,
-      }).start();
-    } else {
-      scale.stopAnimation();
-      scale.setValue(1);
-      Animated.timing(glow, {
-        toValue: 0,
-        duration: 200,
-        useNativeDriver: false,
-      }).start();
+      );
+      loopRef.current = loop;
+      loop.start();
+
+      return () => {
+        loop.stop();
+        // Reset via native driver to avoid JS/native conflict
+        Animated.timing(scale, {
+          toValue: 1,
+          duration: 0,
+          useNativeDriver: true,
+        }).start();
+        loopRef.current = null;
+      };
     }
-  }, [status, scale, glow]);
+  }, [status, scale]);
 
   const { color, opacity } = STATUS_STYLES[status];
-
-  const bgColor = glow.interpolate({
-    inputRange: [0, 1],
-    outputRange: ['rgba(91,216,130,0)', 'rgba(91,216,130,0.15)'],
-  });
 
   return (
     <Pressable onPress={onPress}>
       <Animated.View
         style={[
           styles.container,
-          {
-            backgroundColor: bgColor,
-            transform: [{ scale }],
-          },
+          status === 'active' && styles.activeContainer,
+          { transform: [{ scale }] },
         ]}
       >
         <Animated.Text
@@ -100,6 +92,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 2,
     paddingVertical: 1,
     marginVertical: 1,
+  },
+  activeContainer: {
+    backgroundColor: 'rgba(91,216,130,0.15)',
   },
   text: {
     fontSize: 28,

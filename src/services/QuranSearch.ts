@@ -1,12 +1,13 @@
 /**
- * QuranSearch — n-gram based position detection for Quran recitation.
+ * QuranSearch — fuzzy n-gram based position detection for Quran recitation.
  *
  * Builds a sliding-window index of consecutive words across the entire Quran
  * so that a short transcript snippet can be matched to an exact position.
+ * Uses edit distance for fuzzy word matching to tolerate Whisper transcription errors.
  */
 
 import { QuranDatabase, type FlatWord } from './QuranDatabase';
-import { normalizeArabic } from '../utils/arabic';
+import { normalizeArabic, editDistance } from '../utils/arabic';
 
 export type WordPosition = {
   surah: number;
@@ -21,38 +22,39 @@ export type SearchResult = {
   totalWindows: number; // total windows extracted from transcript
 };
 
-// N-gram sizes to use. 3-grams for recall, 5-grams for precision on ambiguous phrases.
-const NGRAM_SIZE_PRIMARY = 3;
-const NGRAM_SIZE_DISAMBIG = 5;
+const NGRAM_SIZE = 3;
+
+/** Max edit distance per word to count as a fuzzy match (relative to word length). */
+const MAX_EDIT_DISTANCE_PER_WORD = 2;
 
 /**
  * The search index. Built once from the Quran data, then reused.
+ * Key: 3 consecutive normalized words joined by space.
+ * Value: list of positions where that trigram starts.
  */
 let trigramIndex: Map<string, WordPosition[]> | null = null;
-let pentagramIndex: Map<string, WordPosition[]> | null = null;
+
+/**
+ * All unique trigram keys for fuzzy lookup.
+ */
+let trigramKeys: string[] | null = null;
 
 /**
  * Build a sliding-window n-gram index over all Quran words.
- * Each key is n consecutive normalized words joined by space.
- * Each value is the list of positions where that n-gram starts.
  */
 function buildNgramIndex(
   words: FlatWord[],
-  n: number,
 ): Map<string, WordPosition[]> {
   const index = new Map<string, WordPosition[]>();
 
-  for (let i = 0; i <= words.length - n; i++) {
-    // Only build n-grams within contiguous sequences — don't span surah boundaries
-    // Check that all n words are consecutive (same ayah, or sequential ayah transitions)
+  for (let i = 0; i <= words.length - NGRAM_SIZE; i++) {
     const windowWords: string[] = [];
     let valid = true;
 
-    for (let j = 0; j < n; j++) {
+    for (let j = 0; j < NGRAM_SIZE; j++) {
       const w = words[i + j];
       windowWords.push(w.textClean);
 
-      // Check continuity: each word should follow the previous one
       if (j > 0) {
         const prev = words[i + j - 1];
         const curr = words[i + j];
@@ -94,15 +96,30 @@ function buildNgramIndex(
   return index;
 }
 
+/**
+ * Check if a transcript trigram fuzzy-matches a Quran trigram.
+ * Each word must be within MAX_EDIT_DISTANCE_PER_WORD edits.
+ */
+function fuzzyTrigramMatch(transcriptWords: string[], quranKey: string): boolean {
+  const quranWords = quranKey.split(' ');
+  if (quranWords.length !== transcriptWords.length) return false;
+
+  for (let i = 0; i < transcriptWords.length; i++) {
+    const dist = editDistance(transcriptWords[i], quranWords[i]);
+    if (dist > MAX_EDIT_DISTANCE_PER_WORD) return false;
+  }
+  return true;
+}
+
 export const QuranSearch = {
   /**
-   * Build the n-gram indices. Call once at app startup.
-   * Returns the number of entries in the primary index.
+   * Build the n-gram index. Call once at app startup.
+   * Returns the number of entries in the index.
    */
   buildIndex(): number {
     const allWords = QuranDatabase.getAllWords();
-    trigramIndex = buildNgramIndex(allWords, NGRAM_SIZE_PRIMARY);
-    pentagramIndex = buildNgramIndex(allWords, NGRAM_SIZE_DISAMBIG);
+    trigramIndex = buildNgramIndex(allWords);
+    trigramKeys = [...trigramIndex.keys()];
     return trigramIndex.size;
   },
 
@@ -115,40 +132,55 @@ export const QuranSearch = {
 
   /**
    * Find the most likely position in the Quran for the given transcript words.
+   * Uses fuzzy word matching (edit distance) to tolerate Whisper errors.
    *
-   * @param transcriptWords - Array of words from Whisper output (will be normalized)
+   * @param transcriptWords - Array of words from Whisper output (already normalized)
    * @returns Best match with confidence score, or null if no match found
    */
   findPosition(transcriptWords: string[]): SearchResult | null {
-    if (!trigramIndex || !pentagramIndex) {
+    if (!trigramIndex || !trigramKeys) {
       throw new Error('Index not built. Call buildIndex() first.');
     }
 
-    // Normalize all transcript words
     const normalized = transcriptWords.map(w => normalizeArabic(w));
 
-    if (normalized.length < NGRAM_SIZE_PRIMARY) {
-      return null; // Not enough words to form even one trigram
+    if (normalized.length < NGRAM_SIZE) {
+      return null;
     }
 
-    // Step 1: Extract trigram windows and look up each one
-    const votes = new Map<string, number>(); // "surah:ayah:wordIndex" → vote count
+    // Extract trigram windows from transcript and find fuzzy matches
+    const votes = new Map<string, number>();
     let totalWindows = 0;
 
-    for (let i = 0; i <= normalized.length - NGRAM_SIZE_PRIMARY; i++) {
-      const window = normalized.slice(i, i + NGRAM_SIZE_PRIMARY).join(' ');
-      const matches = trigramIndex.get(window);
+    for (let i = 0; i <= normalized.length - NGRAM_SIZE; i++) {
+      const window = normalized.slice(i, i + NGRAM_SIZE);
       totalWindows++;
 
-      if (matches) {
-        for (const pos of matches) {
-          // Vote for the position that would be the START of the transcript
-          // If this trigram is at offset i in the transcript, the transcript
-          // start position is `pos` shifted back by i words
+      // First try exact match (fast path)
+      const exactKey = window.join(' ');
+      const exactMatches = trigramIndex.get(exactKey);
+      if (exactMatches) {
+        for (const pos of exactMatches) {
           const startPos = shiftPositionBack(pos, i);
           if (startPos) {
             const key = `${startPos.surah}:${startPos.ayah}:${startPos.wordIndex}`;
             votes.set(key, (votes.get(key) ?? 0) + 1);
+          }
+        }
+        continue; // exact match found, no need for fuzzy
+      }
+
+      // Fuzzy match: check all trigram keys
+      // Optimization: only check keys whose first word is close
+      for (const quranKey of trigramKeys) {
+        if (fuzzyTrigramMatch(window, quranKey)) {
+          const positions = trigramIndex.get(quranKey)!;
+          for (const pos of positions) {
+            const startPos = shiftPositionBack(pos, i);
+            if (startPos) {
+              const key = `${startPos.surah}:${startPos.ayah}:${startPos.wordIndex}`;
+              votes.set(key, (votes.get(key) ?? 0) + 1);
+            }
           }
         }
       }
@@ -158,51 +190,9 @@ export const QuranSearch = {
       return null;
     }
 
-    // Step 2: Find the top candidates by vote count
+    // Find the top candidate by vote count
     const sorted = [...votes.entries()].sort((a, b) => b[1] - a[1]);
-    const topVotes = sorted[0][1];
-
-    // If there are ties, try disambiguating with 5-grams
-    const topCandidates = sorted.filter(([, v]) => v === topVotes);
-
-    let bestKey = topCandidates[0][0];
-    let bestVoteCount = topVotes;
-
-    if (topCandidates.length > 1 && normalized.length >= NGRAM_SIZE_DISAMBIG) {
-      // Use 5-grams to break ties
-      let bestPentaVotes = -1;
-
-      for (const [candidateKey] of topCandidates) {
-        const [s, a, w] = candidateKey.split(':').map(Number);
-        let pentaVoteCount = 0;
-
-        for (let i = 0; i <= normalized.length - NGRAM_SIZE_DISAMBIG; i++) {
-          const window = normalized
-            .slice(i, i + NGRAM_SIZE_DISAMBIG)
-            .join(' ');
-          const matches = pentagramIndex.get(window);
-          if (matches) {
-            for (const pos of matches) {
-              const startPos = shiftPositionBack(pos, i);
-              if (
-                startPos &&
-                startPos.surah === s &&
-                startPos.ayah === a &&
-                startPos.wordIndex === w
-              ) {
-                pentaVoteCount++;
-              }
-            }
-          }
-        }
-
-        if (pentaVoteCount > bestPentaVotes) {
-          bestPentaVotes = pentaVoteCount;
-          bestKey = candidateKey;
-        }
-      }
-    }
-
+    const [bestKey, bestVoteCount] = sorted[0];
     const [surah, ayah, wordIndex] = bestKey.split(':').map(Number);
 
     return {
@@ -218,7 +208,7 @@ export const QuranSearch = {
    */
   clearIndex(): void {
     trigramIndex = null;
-    pentagramIndex = null;
+    trigramKeys = null;
   },
 };
 

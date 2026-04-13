@@ -74,15 +74,24 @@ describe('RecitationTracker', () => {
       expect(pos.wordIndex).toBe(3); // last word
     });
 
-    it('does not advance when fewer than 3 words are given', () => {
+    it('does not advance for very short input (single short word)', () => {
       tracker.startTracking(1, 1, 0);
-      tracker.processWords(['بسم', 'الله']);
+      tracker.processWords(['بسم']); // 3 chars, below MIN_CHARS threshold
       // Still at starting position
       expect(tracker.getCurrentPosition()).toEqual({
         surah: 1,
         ayah: 1,
         wordIndex: 0,
       });
+    });
+
+    it('advances on two words (character-level matching)', () => {
+      tracker.startTracking(1, 1, 0);
+      tracker.processWords(['بسم', 'الله']); // 6 chars, enough for char match
+      const pos = tracker.getCurrentPosition();
+      expect(pos.surah).toBe(1);
+      expect(pos.ayah).toBe(1);
+      expect(pos.wordIndex).toBeGreaterThan(0);
     });
 
     it('does not advance for non-matching words', () => {
