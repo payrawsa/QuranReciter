@@ -7,7 +7,7 @@
 import { Platform } from 'react-native';
 import RNFS from 'react-native-fs';
 
-export type ModelSize = 'tiny' | 'base' | 'small' | 'medium';
+export type ModelSize = 'tiny' | 'base' | 'small' | 'medium' | 'large-v3-turbo';
 
 export type ModelInfo = {
   size: ModelSize;
@@ -45,11 +45,19 @@ const MODELS: Record<ModelSize, ModelInfo> = {
   },
   medium: {
     size: 'medium',
-    label: 'Medium (Best Accuracy)',
+    label: 'Medium',
     fileName: 'ggml-medium.bin',
     url: 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-medium.bin',
     diskSizeMB: 1530,
-    description: 'Best Arabic accuracy, large download (~1.5 GB)',
+    description: 'Good Arabic accuracy (~1.5 GB)',
+  },
+  'large-v3-turbo': {
+    size: 'large-v3-turbo',
+    label: 'Large V3 Turbo (Best)',
+    fileName: 'ggml-large-v3-turbo.bin',
+    url: 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin',
+    diskSizeMB: 1550,
+    description: 'Best accuracy, fast turbo inference (~1.5 GB)',
   },
 };
 
@@ -254,7 +262,7 @@ export class ModelManager {
    * Get the best available downloaded model (largest = best quality).
    */
   async getBestAvailableModel(): Promise<ModelSize | null> {
-    const priority: ModelSize[] = ['medium', 'small', 'base', 'tiny'];
+    const priority: ModelSize[] = ['large-v3-turbo', 'medium', 'small', 'base', 'tiny'];
     for (const size of priority) {
       if (await this.isModelDownloaded(size)) {
         return size;

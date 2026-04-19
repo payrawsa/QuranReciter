@@ -16,16 +16,28 @@ set -euo pipefail
 BASE_URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
 MODELS_DIR="$(cd "$(dirname "$0")/.." && pwd)/models"
 
-declare -A MODEL_FILES=(
-  [tiny]="ggml-tiny.bin"
-  [base]="ggml-base.bin"
-  [small]="ggml-small.bin"
-  [medium]="ggml-medium.bin"
-)
+get_model_file() {
+  case "$1" in
+    tiny)             echo "ggml-tiny.bin" ;;
+    base)             echo "ggml-base.bin" ;;
+    small)            echo "ggml-small.bin" ;;
+    medium)           echo "ggml-medium.bin" ;;
+    large-v3-turbo)   echo "ggml-large-v3-turbo.bin" ;;
+    *)                echo "" ;;
+  esac
+}
+
+ALL_SIZES="tiny base small medium large-v3-turbo"
 
 download_model() {
   local size="$1"
-  local file="${MODEL_FILES[$size]}"
+  local file
+  file="$(get_model_file "$size")"
+  if [[ -z "$file" ]]; then
+    echo "Unknown model size: $size"
+    echo "Available: $ALL_SIZES all"
+    return 1
+  fi
   local dest="$MODELS_DIR/$file"
 
   if [[ -f "$dest" ]]; then
@@ -43,15 +55,10 @@ mkdir -p "$MODELS_DIR"
 TARGET="${1:-tiny}"
 
 if [[ "$TARGET" == "all" ]]; then
-  for size in tiny base small medium; do
+  for size in $ALL_SIZES; do
     download_model "$size"
   done
 else
-  if [[ -z "${MODEL_FILES[$TARGET]+x}" ]]; then
-    echo "Unknown model size: $TARGET"
-    echo "Available: tiny, base, small, medium, all"
-    exit 1
-  fi
   download_model "$TARGET"
 fi
 

@@ -1,13 +1,12 @@
 /**
  * RecitationTracker — tracks the user's position during Quran recitation.
  *
- * After QuranSearch locks the starting position, the tracker narrows scope
- * to *current ayah + next ayah* only. It uses character-level fuzzy matching
- * (longest common substring) against the scope text to find the user's
- * position, tolerating Whisper transcription errors like extra/missing
- * letters and word boundary differences.
+ * After QuranSearch locks the starting position, the tracker builds a scope
+ * covering the current ayah + several ayahs ahead. It uses character-level
+ * fuzzy matching (longest common substring) against the scope text to find
+ * the user's position, tolerating Whisper transcription errors.
  *
- * As the user completes an ayah the window shifts forward automatically.
+ * As the user advances, the scope window shifts forward automatically.
  * Skipped words (and skipped ayahs) are detected and recorded as errors.
  */
 
@@ -62,6 +61,9 @@ const MIN_CHARS = 5;
 /** Minimum ratio of matched chars to transcript chars to accept a match. */
 const MIN_MATCH_RATIO = 0.4;
 
+/** Number of ayahs ahead of cursor to include in scope. */
+const SCOPE_AYAHS_AHEAD = 2;
+
 // ── Internal: flattened word list for the search scope ─────────────
 
 type ScopeWord = {
@@ -85,7 +87,7 @@ export class RecitationTracker {
   private callbacks: TrackerCallbacks = {};
   private errors: RecitationError[] = [];
 
-  // The flattened word list covering current + next ayah
+  // The flattened word list covering current + several ayahs ahead
   private scope: ScopeWord[] = [];
   // Concatenated normalized characters of all words in scope (no spaces)
   private scopeChars = '';
@@ -93,9 +95,10 @@ export class RecitationTracker {
   private cursorOffset = 0;
   // Character position of cursor in scopeChars
   private cursorCharPos = 0;
-  // The ayah numbers currently in scope
-  private currentAyah: AyahData | null = null;
-  private nextAyah: AyahData | null = null;
+  // The first ayah in scope
+  private scopeStartAyah: { surah: number; ayah: number } | null = null;
+  // The last ayah in scope
+  private scopeEndAyah: { surah: number; ayah: number } | null = null;
 
   // Track which words have been correctly recited or skipped
   // Key: "surah:ayah:wordIndex"
@@ -129,8 +132,8 @@ export class RecitationTracker {
     this.scopeChars = '';
     this.cursorOffset = 0;
     this.cursorCharPos = 0;
-    this.currentAyah = null;
-    this.nextAyah = null;
+    this.scopeStartAyah = null;
+    this.scopeEndAyah = null;
   }
 
   /**
@@ -246,13 +249,51 @@ export class RecitationTracker {
         current: { ...this.cursor },
         skippedWords,
       });
+
+      // Detect ayah completion: if we moved to a different ayah, all
+      // ayahs between prevPos and cursor (inclusive of prevPos's ayah)
+      // have been completed.
+      if (prevPos.surah !== this.cursor.surah || prevPos.ayah !== this.cursor.ayah) {
+        let pos: { surah: number; ayah: number } | null = {
+          surah: prevPos.surah,
+          ayah: prevPos.ayah,
+        };
+        while (pos) {
+          if (pos.surah === this.cursor.surah && pos.ayah === this.cursor.ayah) break;
+          this.callbacks.onAyahComplete?.({ surah: pos.surah, ayah: pos.ayah });
+          pos = this.getNextAyahPosition(pos.surah, pos.ayah);
+        }
+      }
     }
 
-    // Check if the current ayah is completed
-    this.checkAyahCompletion();
+    // Check if scope needs extending
+    this.ensureScopeAhead();
   }
 
   // ── Internal helpers ──────────────────────────────────────────────
+
+  /**
+   * Ensure the scope extends far enough ahead of the cursor.
+   * If cursor is within 2 ayahs of the scope end, rebuild.
+   */
+  private ensureScopeAhead(): void {
+    if (!this.scopeEndAyah) return;
+    // Count how many ayahs remain between cursor and scope end
+    let remaining = 0;
+    let pos: { surah: number; ayah: number } | null = {
+      surah: this.cursor.surah,
+      ayah: this.cursor.ayah,
+    };
+    while (pos) {
+      if (pos.surah === this.scopeEndAyah.surah && pos.ayah === this.scopeEndAyah.ayah) break;
+      pos = this.getNextAyahPosition(pos.surah, pos.ayah);
+      remaining++;
+      if (remaining > SCOPE_AYAHS_AHEAD) break;
+    }
+    if (remaining <= 2) {
+      this.rebuildScope();
+    }
+  }
 
   /**
    * Detect words that were skipped between the old cursor offset and
@@ -338,57 +379,42 @@ export class RecitationTracker {
   }
 
   /**
-   * Rebuild the flattened scope from the current ayah + next ayah,
-   * compute character positions, and set cursorOffset/cursorCharPos.
+   * Rebuild the flattened scope from the current cursor position,
+   * loading SCOPE_AYAHS_AHEAD ayahs ahead. Computes character positions
+   * and sets cursorOffset/cursorCharPos.
    */
   private rebuildScope(): void {
     this.scope = [];
     this.scopeChars = '';
 
-    this.currentAyah =
-      QuranDatabase.getAyah(this.cursor.surah, this.cursor.ayah) ?? null;
-    if (!this.currentAyah) {
+    const startAyah = QuranDatabase.getAyah(this.cursor.surah, this.cursor.ayah);
+    if (!startAyah) {
       this.status = 'completed';
       return;
     }
 
-    // Determine next ayah (handles surah boundary)
-    const nextPos = this.getNextAyahPosition(
-      this.cursor.surah,
-      this.cursor.ayah,
-    );
-    this.nextAyah = nextPos
-      ? QuranDatabase.getAyah(nextPos.surah, nextPos.ayah) ?? null
-      : null;
+    this.scopeStartAyah = { surah: startAyah.surah, ayah: startAyah.ayah };
 
-    // Flatten current ayah words with character positions
+    // Collect current ayah + SCOPE_AYAHS_AHEAD more
     let offset = 0;
     let charPos = 0;
-    for (const w of this.currentAyah.words) {
-      const charStart = charPos;
-      const charEnd = charStart + w.textClean.length;
-      this.scope.push({
-        text: w.textClean,
-        surah: this.currentAyah.surah,
-        ayah: this.currentAyah.ayah,
-        wordIndex: w.index,
-        offset,
-        charStart,
-        charEnd,
-      });
-      charPos = charEnd;
-      offset++;
-    }
+    let currentPos: { surah: number; ayah: number } | null = {
+      surah: startAyah.surah,
+      ayah: startAyah.ayah,
+    };
+    let ayahsLoaded = 0;
 
-    // Flatten next ayah words
-    if (this.nextAyah) {
-      for (const w of this.nextAyah.words) {
+    while (currentPos && ayahsLoaded <= SCOPE_AYAHS_AHEAD) {
+      const ayahData = QuranDatabase.getAyah(currentPos.surah, currentPos.ayah);
+      if (!ayahData) break;
+
+      for (const w of ayahData.words) {
         const charStart = charPos;
         const charEnd = charStart + w.textClean.length;
         this.scope.push({
           text: w.textClean,
-          surah: this.nextAyah.surah,
-          ayah: this.nextAyah.ayah,
+          surah: ayahData.surah,
+          ayah: ayahData.ayah,
           wordIndex: w.index,
           offset,
           charStart,
@@ -397,12 +423,16 @@ export class RecitationTracker {
         charPos = charEnd;
         offset++;
       }
+
+      this.scopeEndAyah = { surah: ayahData.surah, ayah: ayahData.ayah };
+      currentPos = this.getNextAyahPosition(currentPos.surah, currentPos.ayah);
+      ayahsLoaded++;
     }
 
     // Build concatenated character string
     this.scopeChars = this.scope.map(sw => sw.text).join('');
 
-    // Set cursor offset and char position
+    // Set cursor offset and char position (use charEnd since we've already matched this word)
     this.cursorOffset = this.scope.findIndex(
       sw =>
         sw.surah === this.cursor.surah &&
@@ -410,7 +440,15 @@ export class RecitationTracker {
         sw.wordIndex === this.cursor.wordIndex,
     );
     if (this.cursorOffset < 0) this.cursorOffset = 0;
-    this.cursorCharPos = this.scope[this.cursorOffset]?.charStart ?? 0;
+    // Use charEnd if cursor word was already matched (rebuild case),
+    // charStart if this is the initial build (word not yet matched).
+    const cursorWord = this.scope[this.cursorOffset];
+    const alreadyMatched = cursorWord
+      ? this.wordStatuses.has(`${cursorWord.surah}:${cursorWord.ayah}:${cursorWord.wordIndex}`)
+      : false;
+    this.cursorCharPos = cursorWord
+      ? (alreadyMatched ? cursorWord.charEnd : cursorWord.charStart)
+      : 0;
   }
 
   /**
@@ -490,52 +528,6 @@ export class RecitationTracker {
       return this.scope[this.scope.length - 1];
     }
     return null;
-  }
-
-  /**
-   * Check if we've reached the end of the current ayah.
-   * If so, shift scope forward and emit onAyahComplete.
-   */
-  private checkAyahCompletion(): void {
-    if (!this.currentAyah) return;
-
-    const lastWordIndex = this.currentAyah.words.length - 1;
-    const cursorIsInCurrentAyah =
-      this.cursor.surah === this.currentAyah.surah &&
-      this.cursor.ayah === this.currentAyah.ayah;
-
-    // Ayah is complete when cursor reaches or passes the last word
-    if (cursorIsInCurrentAyah && this.cursor.wordIndex >= lastWordIndex) {
-      this.callbacks.onAyahComplete?.({
-        surah: this.currentAyah.surah,
-        ayah: this.currentAyah.ayah,
-      });
-
-      // Shift: next ayah becomes current, load a new next
-      this.advanceScope();
-    } else if (!cursorIsInCurrentAyah) {
-      // Cursor moved into the next ayah — current ayah is done
-      this.callbacks.onAyahComplete?.({
-        surah: this.currentAyah.surah,
-        ayah: this.currentAyah.ayah,
-      });
-      this.advanceScope();
-    }
-  }
-
-  /**
-   * Shift the scope: current ayah = old next ayah, load new next ayah.
-   */
-  private advanceScope(): void {
-    if (!this.nextAyah) {
-      // No more ayahs — recitation complete
-      this.status = 'completed';
-      return;
-    }
-
-    // The cursor is now somewhere in what was the next ayah.
-    // Rebuild scope starting from cursor position.
-    this.rebuildScope();
   }
 
   /**

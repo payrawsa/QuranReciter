@@ -52,6 +52,7 @@ export default function RecitationScreen({
     transcription,
     startRecording,
     stopRecording,
+    setTargetDuration,
   } = whisper;
 
   // ── Recitation state ──
@@ -71,6 +72,8 @@ export default function RecitationScreen({
   const trackerRef = useRef(new RecitationTracker());
   const transcriptWordsRef = useRef<string[]>([]);
   const seekingWordsRef = useRef<string[]>([]);
+  /** Append-only queue for tracking: words added from Whisper, evicted after processing */
+  const trackingQueueRef = useRef<string[]>([]);
   const pulseAnim = useRef(new Animated.Value(1)).current;
 
   // ── Build search index on mount ──
@@ -148,11 +151,13 @@ export default function RecitationScreen({
         console.log(`[Recitation] Search result:`, result ? `surah=${result.position.surah} ayah=${result.position.ayah} word=${result.position.wordIndex} confidence=${result.confidence.toFixed(3)} matchCount=${result.matchCount}` : 'null');
 
         if (result && result.confidence >= 0.15) {
-          // Found position — start tracking
-          console.log(`[Recitation] Position locked! Moving to tracking phase.`);
+          // Found position — switch to 1s tracking slices
+          console.log(`[Recitation] Position locked! Switching to 1s tracking.`);
+          setTargetDuration(1);
           setSurah(result.position.surah);
           setAyah(result.position.ayah);
           setCurrentWordIndex(result.position.wordIndex);
+          trackingQueueRef.current = []; // reset queue for tracking
           beginTracking(
             result.position.surah,
             result.position.ayah,
@@ -162,9 +167,24 @@ export default function RecitationScreen({
         }
       }
     } else if (phase === 'tracking') {
-      console.log(`[Recitation] Tracking: processing ${words.length} words: "${words.join(' ')}"`);
-      transcriptWordsRef.current = words;
-      trackerRef.current.processWords(words);
+      // Append new words to queue, cap at 100
+      const MAX_QUEUE = 100;
+      const queue = trackingQueueRef.current;
+      queue.push(...words);
+      if (queue.length > MAX_QUEUE) {
+        queue.splice(0, queue.length - MAX_QUEUE);
+      }
+
+      console.log(`[Recitation] Tracking: queue=${queue.length} (+${words.length} new): "${words.join(' ')}"`);
+
+      // Process 3 words at a time from the front of the queue
+      const CHUNK_SIZE = 3;
+      while (queue.length >= CHUNK_SIZE) {
+        const chunk = queue.slice(0, CHUNK_SIZE);
+        trackerRef.current.processWords(chunk);
+        // Evict the processed chunk
+        queue.splice(0, CHUNK_SIZE);
+      }
 
       // Update UI state from tracker
       const pos = trackerRef.current.getCurrentPosition();
@@ -236,9 +256,10 @@ export default function RecitationScreen({
       setWordStatuses(new Map());
       transcriptWordsRef.current = [];
       seekingWordsRef.current = [];
+      trackingQueueRef.current = [];
       trackerRef.current.stop();
 
-      await startRecording();
+      await startRecording(2.5); // 2.5s speech accumulation for seeking
       setPhase('seeking');
     } else {
       // Stop recording — get errors before stopping tracker

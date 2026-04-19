@@ -80,8 +80,9 @@ export function useWhisper() {
 
   /**
    * Start real-time transcription.
+   * @param targetDurationSec — speech duration per inference (5 for seeking, 1 for tracking)
    */
-  const startRecording = useCallback(async () => {
+  const startRecording = useCallback(async (targetDurationSec = 5) => {
     try {
       setError(null);
       setTranscription(null);
@@ -92,7 +93,7 @@ export function useWhisper() {
         return;
       }
 
-      await whisperServiceRef.current.startRealtimeTranscription();
+      await whisperServiceRef.current.startRealtimeTranscription(targetDurationSec);
       setStatus('recording');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to start recording');
@@ -126,6 +127,13 @@ export function useWhisper() {
   }, [currentModel, refreshModels]);
 
   /**
+   * Change the target speech duration without restarting recording.
+   */
+  const setTargetDuration = useCallback((seconds: number) => {
+    whisperServiceRef.current.setTargetDuration(seconds);
+  }, []);
+
+  /**
    * Cancel an active download.
    */
   const cancelDownload = useCallback(() => {
@@ -146,6 +154,7 @@ export function useWhisper() {
     loadModel,
     startRecording,
     stopRecording,
+    setTargetDuration,
     deleteModel,
     cancelDownload,
   };
