@@ -39,10 +39,8 @@ type RecitationPhase =
 
 export default function RecitationScreen({
   whisper,
-  onBack,
 }: {
   whisper: WhisperState;
-  onBack: () => void;
 }) {
   const insets = useSafeAreaInsets();
 
@@ -325,9 +323,7 @@ export default function RecitationScreen({
     <View style={[styles.root, { paddingTop: insets.top }]}>
       {/* ── Header ── */}
       <View style={styles.header}>
-        <Pressable onPress={onBack} style={styles.headerButton}>
-          <Text style={styles.headerButtonText}>‹</Text>
-        </Pressable>
+        <View style={styles.headerButton} />
         <Pressable
           onPress={() => setShowSurahSelector(true)}
           style={styles.headerCenter}

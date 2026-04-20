@@ -9,8 +9,8 @@
 - **ModelManager** — downloads/caches Whisper `.bin` models from HuggingFace to device storage
 - **WhisperService** — loads a Whisper context, runs real-time transcription with word timestamps, Arabic language preset
 - **AudioRecorder** — wraps AudioPcmStreamAdapter for raw PCM access
-- **useWhisper hook** — React state management for the full model download → record → transcribe flow
-- **RecorderScreen** — test UI with model picker, record button, live Arabic transcript display
+- **useWhisper hook** — React state management for the full model download → record → transcribe flow (auto-loads default `base-ar-quran` model on mount)
+- Default model: fine-tuned `base-ar-quran` from `payrawsa/whisper-base-ar-quran-ggml` — auto-downloaded on first launch
 - Android `RECORD_AUDIO` permission + iOS `NSMicrophoneUsageDescription` configured
 
 ---

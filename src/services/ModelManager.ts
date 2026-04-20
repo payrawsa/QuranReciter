@@ -7,7 +7,7 @@
 import { Platform } from 'react-native';
 import RNFS from 'react-native-fs';
 
-export type ModelSize = 'tiny' | 'base' | 'small' | 'medium' | 'large-v3-turbo';
+export type ModelSize = 'tiny' | 'base' | 'small' | 'medium' | 'large-v3-turbo' | 'base-ar-quran';
 
 export type ModelInfo = {
   size: ModelSize;
@@ -59,7 +59,17 @@ const MODELS: Record<ModelSize, ModelInfo> = {
     diskSizeMB: 1550,
     description: 'Best accuracy, fast turbo inference (~1.5 GB)',
   },
+  'base-ar-quran': {
+    size: 'base-ar-quran',
+    label: 'Base Arabic Quran (Default)',
+    fileName: 'ggml-base-ar-quran.bin',
+    url: 'https://huggingface.co/payrawsa/whisper-base-ar-quran-ggml/resolve/main/ggml-model.bin',
+    diskSizeMB: 142,
+    description: 'Fine-tuned for Quran recitation (~142 MB)',
+  },
 };
+
+export const DEFAULT_MODEL: ModelSize = 'base-ar-quran';
 
 export type DownloadProgress = {
   bytesWritten: number;

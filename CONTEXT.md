@@ -8,7 +8,7 @@
 
 **QuranReciter** is a React Native bare-workflow mobile app (iOS + Android) that uses on-device Whisper speech-to-text to help users practice Quran recitation. The user recites into the microphone; the app identifies their position in the Quran, tracks word-by-word progress in real time, and flags errors (skipped words, skipped ayahs).
 
-All inference is local — no network calls for speech recognition. The Whisper model is downloaded once from HuggingFace and cached on-device.
+All inference is local — no network calls for speech recognition. The app uses a fine-tuned Whisper model (`base-ar-quran`) from HuggingFace, downloaded once on first launch and cached on-device.
 
 ---
 
@@ -32,10 +32,9 @@ All inference is local — no network calls for speech recognition. The Whisper 
 ## Architecture Overview
 
 ```
-App.tsx                          ← Root: switches between RecorderScreen and RecitationScreen
+App.tsx                          ← Root: auto-loads default model, shows loading screen then RecitationScreen
 ├── screens/
-│   ├── RecorderScreen.tsx       ← Model management UI (download/load Whisper model, test mic)
-│   └── RecitationScreen.tsx     ← Main recitation practice UI (Phase 5)
+│   └── RecitationScreen.tsx     ← Main recitation practice UI
 ├── components/
 │   ├── QuranWordView.tsx        ← Single Arabic word with animated highlight states
 │   ├── AyahDisplay.tsx          ← Renders one ayah as a row of QuranWordView components
@@ -43,9 +42,9 @@ App.tsx                          ← Root: switches between RecorderScreen and R
 │   ├── SessionSummary.tsx       ← Modal: post-session error report
 │   └── ErrorOverlay.tsx         ← Legacy overlay (pre-Phase 5, still exported)
 ├── hooks/
-│   └── useWhisper.ts            ← React hook: model download → load → record → transcribe
+│   └── useWhisper.ts            ← React hook: auto-downloads default model → load → record → transcribe
 ├── services/
-│   ├── ModelManager.ts          ← Downloads/caches Whisper .bin models from HuggingFace
+│   ├── ModelManager.ts          ← Downloads/caches Whisper .bin models from HuggingFace; DEFAULT_MODEL = 'base-ar-quran'
 │   ├── WhisperService.ts        ← Wraps whisper.rn context: init, realtime transcription (Arabic, VAD, word timestamps)
 │   ├── AudioRecorder.ts         ← Wraps AudioPcmStreamAdapter for raw 16-bit PCM at 16kHz mono
 │   ├── QuranDatabase.ts         ← Loads quran.json, provides lookup by surah/ayah/word
@@ -121,8 +120,8 @@ Components have **no barrel export file** — import directly: `import { AyahDis
 
 ## App Flow
 
-1. **RecorderScreen**: User downloads a Whisper model (tiny/base/small/medium), model is cached in app's document directory. Once loaded, user can test raw transcription.
-2. **RecitationScreen** (navigated via "Start Recitation ›" button when model is ready):
+1. **App Launch**: The `useWhisper` hook auto-downloads and loads the default model (`base-ar-quran`, a fine-tuned Whisper model from `payrawsa/whisper-base-ar-quran-ggml`). A loading screen shows download progress.
+2. **RecitationScreen** (shown immediately once model is ready):
    - User selects surah/ayah via `SurahSelector`
    - Taps record → enters **seeking** phase (accumulates transcript words, runs `QuranSearch.findPosition()`)
    - When position found with confidence ≥ 0.15 → enters **tracking** phase
@@ -231,10 +230,12 @@ npm install
 ```
 
 ### Download Whisper models
-Models are not checked into the repo. Run the download script before your first build:
+The default model (`base-ar-quran`) is automatically downloaded on first app launch. No manual download is needed.
+
+For development, you can optionally pre-download models to avoid network issues on simulators:
 ```bash
 ./scripts/download-models.sh tiny      # ~75 MB, fastest
-./scripts/download-models.sh small     # ~466 MB, recommended for Arabic
+./scripts/download-models.sh small     # ~466 MB
 ./scripts/download-models.sh all       # downloads all sizes
 ```
 
@@ -358,8 +359,8 @@ Run with `npm test`. Uses Jest with `@react-native/jest-preset`.
 1. **Whisper requires real device**: Emulators don't have working microphones for real-time audio capture via `AudioPcmStreamAdapter`.
 2. **quran.json is large**: ~6.5 MB bundled JSON. Loaded synchronously via `import` at startup. If app launch is slow, consider lazy loading.
 3. **N-gram index build time**: `QuranSearch.buildIndex()` is called in `useEffect` on RecitationScreen mount. It processes the entire Quran (~82K words) and is cached in module-level variables. Subsequent calls are effectively free.
-4. **No navigation library**: Screen switching is done via state in `App.tsx` (`'recorder' | 'recitation'`). If more screens are added, install `@react-navigation/native`.
-5. **useWhisper hook is shared**: `useWhisper()` is called once in `App.tsx` and passed as a `whisper` prop to both screens. This ensures the loaded model, status, and transcription state persist across screen navigation.
+4. **No navigation library**: The app is a single-screen app. `App.tsx` shows a loading screen during model init, then renders `RecitationScreen` directly. If more screens are added, install `@react-navigation/native`.
+5. **useWhisper hook**: `useWhisper()` is called once in `App.tsx` and auto-loads the default model on mount. It's passed as a `whisper` prop to `RecitationScreen`.
 6. **Release signing not configured**: Both Android and iOS use debug signing. Must be set up before store submission.
 7. **Hermes + New Architecture**: Both are enabled. All native modules must be compatible.
-8. **Model sizes**: Whisper models: tiny (~75 MB), base (~142 MB), small (~466 MB, recommended), medium (~1530 MB). No "large" model is offered. User downloads on first use → stored via react-native-fs in the app's document directory.
+8. **Default model**: The app uses `base-ar-quran` (~142 MB), a Whisper base model fine-tuned for Quran recitation, from `huggingface.co/payrawsa/whisper-base-ar-quran-ggml`. Other model sizes (tiny, base, small, medium, large-v3-turbo) are still defined in `ModelManager.ts` but are not exposed in the UI. The model is auto-downloaded on first launch.

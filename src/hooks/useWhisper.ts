@@ -3,7 +3,7 @@
  * to give components a simple interface for real-time Arabic speech-to-text.
  */
 import { useState, useRef, useCallback, useEffect } from 'react';
-import { ModelManager, type ModelSize, type DownloadProgress } from '../services/ModelManager';
+import { ModelManager, DEFAULT_MODEL, type ModelSize, type DownloadProgress } from '../services/ModelManager';
 import { WhisperService, type TranscriptionUpdate } from '../services/WhisperService';
 import { requestMicrophonePermission } from '../utils/permissions';
 
@@ -21,24 +21,16 @@ export function useWhisper() {
   const [downloadProgress, setDownloadProgress] = useState<DownloadProgress | null>(null);
   const [transcription, setTranscription] = useState<TranscriptionUpdate | null>(null);
   const [currentModel, setCurrentModel] = useState<ModelSize | null>(null);
-  const [availableModels, setAvailableModels] = useState<
-    Array<{ size: ModelSize; label: string; downloaded: boolean; diskSizeMB: number; description: string }>
-  >([]);
 
   const modelManagerRef = useRef(new ModelManager());
   const whisperServiceRef = useRef(new WhisperService());
 
-  // Load available models on mount
+  // Auto-download and load the default model on mount
   useEffect(() => {
-    refreshModels();
+    loadModel(DEFAULT_MODEL);
     return () => {
       whisperServiceRef.current.release();
     };
-  }, []);
-
-  const refreshModels = useCallback(async () => {
-    const models = await modelManagerRef.current.getAvailableModels();
-    setAvailableModels(models);
   }, []);
 
   /**
@@ -71,12 +63,11 @@ export function useWhisper() {
       });
 
       await whisperServiceRef.current.initModel(modelPath);
-      await refreshModels();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load model');
       setStatus('error');
     }
-  }, [refreshModels]);
+  }, []);
 
   /**
    * Start real-time transcription.
@@ -114,32 +105,10 @@ export function useWhisper() {
   }, []);
 
   /**
-   * Delete a downloaded model.
-   */
-  const deleteModel = useCallback(async (size: ModelSize) => {
-    await modelManagerRef.current.deleteModel(size);
-    if (currentModel === size) {
-      await whisperServiceRef.current.release();
-      setCurrentModel(null);
-      setStatus('idle');
-    }
-    await refreshModels();
-  }, [currentModel, refreshModels]);
-
-  /**
    * Change the target speech duration without restarting recording.
    */
   const setTargetDuration = useCallback((seconds: number) => {
     whisperServiceRef.current.setTargetDuration(seconds);
-  }, []);
-
-  /**
-   * Cancel an active download.
-   */
-  const cancelDownload = useCallback(() => {
-    modelManagerRef.current.cancelDownload();
-    setDownloadProgress(null);
-    setStatus('idle');
   }, []);
 
   return {
@@ -149,14 +118,10 @@ export function useWhisper() {
     downloadProgress,
     transcription,
     currentModel,
-    availableModels,
     // Actions
-    loadModel,
     startRecording,
     stopRecording,
     setTargetDuration,
-    deleteModel,
-    cancelDownload,
   };
 }
 

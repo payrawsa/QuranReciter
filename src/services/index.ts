@@ -1,7 +1,7 @@
 export { AudioRecorder } from './AudioRecorder';
 export { WhisperService } from './WhisperService';
 export type { TranscriptionUpdate, TranscriptionSegment, WhisperServiceCallbacks } from './WhisperService';
-export { ModelManager } from './ModelManager';
+export { ModelManager, DEFAULT_MODEL } from './ModelManager';
 export type { ModelSize, ModelInfo, DownloadProgress, DownloadCallbacks } from './ModelManager';
 export { QuranDatabase } from './QuranDatabase';
 export type { AyahData, QuranWord, FlatWord } from './QuranDatabase';
